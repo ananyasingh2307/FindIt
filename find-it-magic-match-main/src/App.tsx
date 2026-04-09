@@ -21,7 +21,7 @@ const queryClient = new QueryClient();
 
 // A simple wrapper to protect Admin-only routes
 const AdminRoute = ({ children }: { children: React.ReactNode }) => {
-  const { user, loading, isAdmin } = useAuth();
+  const { loading, isAdmin } = useAuth();
   
   if (loading) return null; // Wait for auth to resolve
   return isAdmin ? <>{children}</> : <Navigate to="/dashboard" replace />;
@@ -34,7 +34,8 @@ const App = () => (
         <ItemsProvider>
           <Toaster />
           <Sonner />
-          <BrowserRouter>
+          {/* CRITICAL FIX: Added basename to match your GitHub repo name */}
+          <BrowserRouter basename="/FindIt">
             <Routes>
               {/* Public/Auth Routes */}
               <Route path="/login" element={<Login />} />
