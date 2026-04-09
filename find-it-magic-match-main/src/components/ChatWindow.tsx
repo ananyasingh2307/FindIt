@@ -1,14 +1,13 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Send, X, MessageSquare, Shield, Clock, CheckCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { useItems } from "@/context/ItemsContext";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
 
 interface ChatProps {
-  itemId: string;
+  itemId: string | null; // Changed to allow null for Admin Support
   itemTitle: string;
   receiverId: string;
   onClose: () => void;
@@ -29,44 +28,60 @@ const ChatWindow = ({ itemId, itemTitle, receiverId, onClose }: ChatProps) => {
 
   // 1. Initial Fetch
   useEffect(() => {
-    if (!itemId || !user) return;
+    if (!user) return;
 
     const fetchMessages = async () => {
-      setIsLoading(true);
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('item_id', itemId)
-        .or(`sender_id.eq.${user.id},receiver_id.eq.${user.id}`) // Security: Only my messages
-        .order('created_at', { ascending: true });
-      
-      if (data) {
-        setMessages(data);
-        setTimeout(() => scrollToBottom("auto"), 100);
+      try {
+        setIsLoading(true);
+        
+        let query = supabase
+          .from('messages')
+          .select('*')
+          .or(`and(sender_id.eq.${user.id},receiver_id.eq.${receiverId}),and(sender_id.eq.${receiverId},receiver_id.eq.${user.id})`);
+        
+        // Handle Support vs Item Inquiry
+        if (itemId) {
+          query = query.eq('item_id', itemId);
+        } else {
+          query = query.is('item_id', null);
+        }
+
+        const { data, error } = await query.order('created_at', { ascending: true });
+        
+        if (data) {
+          setMessages(data);
+          setTimeout(() => scrollToBottom("auto"), 100);
+        }
+        if (error) throw error;
+      } catch (err) {
+        console.error("Chat fetch error:", err);
+      } finally {
+        setIsLoading(false); // Ensures loading dots disappear
       }
-      if (error) console.error("Chat fetch error:", error);
-      setIsLoading(false);
     };
 
     fetchMessages();
 
-    // 2. Real-time subscription with corrected filter
+    // 2. Real-time subscription
+    const channelId = itemId ? `chat:${itemId}` : `support:${user.id}:${receiverId}`;
     const channel = supabase
-      .channel(`chat:${itemId}`)
+      .channel(channelId)
       .on('postgres_changes', 
         { 
           event: 'INSERT', 
           schema: 'public', 
-          table: 'messages', 
-          filter: `item_id=eq.${itemId}` 
+          table: 'messages'
         }, 
         (payload) => {
-          // Check if the message belongs to this conversation's participants
           const msg = payload.new;
-          if (
+          // Verify this message belongs in this specific window
+          const isCorrectParticipants = 
             (msg.sender_id === user.id || msg.receiver_id === user.id) &&
-            (msg.sender_id === receiverId || msg.receiver_id === receiverId)
-          ) {
+            (msg.sender_id === receiverId || msg.receiver_id === receiverId);
+          
+          const isCorrectContext = itemId ? msg.item_id === itemId : msg.item_id === null;
+
+          if (isCorrectParticipants && isCorrectContext) {
             setMessages((prev) => {
               if (prev.find(m => m.id === msg.id)) return prev;
               return [...prev, msg];
@@ -91,10 +106,10 @@ const ChatWindow = ({ itemId, itemTitle, receiverId, onClose }: ChatProps) => {
     setIsSending(true);
     
     try {
-      await sendMessage(itemId, receiverId, content);
+      await sendMessage(itemId as string, receiverId, content);
       scrollToBottom();
     } catch (error) {
-      setNewMsg(content); // Return text on failure
+      setNewMsg(content); 
       console.error("Failed to send:", error);
     } finally {
       setIsSending(false);
@@ -108,17 +123,17 @@ const ChatWindow = ({ itemId, itemTitle, receiverId, onClose }: ChatProps) => {
       exit={{ y: 100, opacity: 0 }}
       className="fixed bottom-6 right-6 w-[350px] md:w-[420px] h-[580px] bg-card border border-border shadow-2xl rounded-[2rem] flex flex-col z-[100] overflow-hidden ring-1 ring-black/5"
     >
-      {/* Dynamic Header */}
       <div className="p-4 bg-primary text-primary-foreground flex items-center justify-between shadow-lg relative overflow-hidden">
-        {/* Abstract background shape */}
         <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full -mr-16 -mt-16 blur-2xl" />
         
         <div className="flex items-center gap-3 relative z-10">
           <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center border border-white/30">
-            <MessageSquare className="w-5 h-5" />
+            {itemId ? <MessageSquare className="w-5 h-5" /> : <Shield className="w-5 h-5" />}
           </div>
           <div className="min-w-0">
-            <p className="text-[9px] font-bold uppercase tracking-widest opacity-70">Item Inquiry</p>
+            <p className="text-[9px] font-bold uppercase tracking-widest opacity-70">
+              {itemId ? "Item Inquiry" : "Staff Support"}
+            </p>
             <h4 className="text-sm font-bold truncate leading-none">{itemTitle}</h4>
             <div className="flex items-center gap-1 mt-1">
                <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse" />
@@ -127,21 +142,16 @@ const ChatWindow = ({ itemId, itemTitle, receiverId, onClose }: ChatProps) => {
           </div>
         </div>
         
-        <button 
-          onClick={onClose} 
-          className="p-2 hover:bg-white/10 rounded-full transition-colors relative z-10"
-        >
+        <button onClick={onClose} className="p-2 hover:bg-white/10 rounded-full transition-colors relative z-10">
           <X className="w-5 h-5" />
         </button>
       </div>
 
-      {/* Safety Banner */}
       <div className="bg-amber-50 dark:bg-amber-950/20 px-4 py-1.5 border-b border-amber-100 dark:border-amber-900/30 flex items-center gap-2">
         <Shield className="w-3 h-3 text-amber-600" />
         <span className="text-[10px] font-semibold text-amber-700 dark:text-amber-500">Meet in public campus areas only.</span>
       </div>
 
-      {/* Messages Scroll Area */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-muted/5 custom-scrollbar">
         {isLoading ? (
           <div className="h-full flex items-center justify-center">
@@ -157,7 +167,11 @@ const ChatWindow = ({ itemId, itemTitle, receiverId, onClose }: ChatProps) => {
               <Send className="w-8 h-8 text-muted-foreground/40" />
             </div>
             <h5 className="text-sm font-bold text-foreground">No messages yet</h5>
-            <p className="text-xs text-muted-foreground mt-1">Ask the reporter about the item's condition or arrange a meeting place.</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              {itemId 
+                ? "Ask the reporter about the item's condition or arrange a meeting place."
+                : "Describe your issue to the campus administrator."}
+            </p>
           </div>
         ) : (
           messages.map((m, i) => {
@@ -189,7 +203,6 @@ const ChatWindow = ({ itemId, itemTitle, receiverId, onClose }: ChatProps) => {
         <div ref={scrollRef} />
       </div>
 
-      {/* Input Area */}
       <div className="p-4 bg-background border-t border-border">
         <form onSubmit={handleSend} className="flex items-end gap-2 bg-muted/30 rounded-2xl p-1 pr-2 border border-transparent focus-within:border-primary/20 focus-within:bg-background transition-all">
           <textarea

@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { LostFoundItem } from "@/context/ItemsContext";
 import { useAuth } from "@/context/AuthContext";
-import { MapPin, Clock, MessageSquare, UserCheck, History } from "lucide-react";
+import { MapPin, Clock, MessageSquare, UserCheck, History, Image as ImageIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import ChatWindow from "./ChatWindow";
 
@@ -38,9 +38,10 @@ const ItemCard = ({ item, index = 0 }: { item: LostFoundItem; index?: number }) 
   const { user } = useAuth();
   
   const emoji = categoryIcons[item.category] || categoryIcons.other;
-
-  // Logic: Use item.submitted_by (Supabase style) or item.submittedBy (Context style)
   const isOwner = user?.id === item.submittedBy;
+
+  // Supports both camelCase and snake_case depending on your Context mapping
+  const displayImage = item.imageUrl || (item as any).image_url;
 
   return (
     <>
@@ -51,9 +52,25 @@ const ItemCard = ({ item, index = 0 }: { item: LostFoundItem; index?: number }) 
         transition={{ duration: 0.4, delay: index * 0.05 }}
         className="bg-card border border-border/50 rounded-[2rem] p-5 flex flex-col h-full hover:shadow-xl hover:shadow-black/5 transition-all duration-300 group"
       >
-        {/* Category Visual */}
-        <div className="h-32 rounded-[1.5rem] bg-muted/50 flex items-center justify-center text-4xl mb-4 group-hover:scale-[1.02] transition-transform duration-300">
-          {emoji}
+        {/* Visual Header (Image or Emoji) */}
+        <div className="h-44 rounded-[1.5rem] bg-muted/50 flex items-center justify-center overflow-hidden mb-4 group-hover:scale-[1.02] transition-transform duration-500 relative">
+          {displayImage ? (
+            <img 
+              src={displayImage} 
+              alt={item.title} 
+              className="w-full h-full object-cover transition-opacity duration-500"
+              loading="lazy"
+            />
+          ) : (
+            <span className="text-5xl drop-shadow-sm">{emoji}</span>
+          )}
+          
+          {/* Subtle Category Overlay for Images */}
+          {displayImage && (
+            <div className="absolute top-3 left-3 px-3 py-1 bg-black/30 backdrop-blur-md rounded-full text-[9px] text-white font-black uppercase tracking-widest">
+              {item.category}
+            </div>
+          )}
         </div>
 
         {/* Header Info */}

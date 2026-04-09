@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
+import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client"; 
 import { toast } from "sonner";
 
@@ -28,6 +28,7 @@ interface ItemsContextType {
   sendMessage: (itemId: string, receiverId: string, content: string) => Promise<void>;
   reunionCount: number;
   loading: boolean;
+  refreshItems: () => Promise<void>;
 }
 
 const ItemsContext = createContext<ItemsContextType | undefined>(undefined);
@@ -36,7 +37,8 @@ export const ItemsProvider = ({ children }: { children: ReactNode }) => {
   const [items, setItems] = useState<LostFoundItem[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const fetchItems = async () => {
+  // Memoized fetch function for better performance
+  const fetchItems = useCallback(async () => {
     try {
       const { data, error } = await supabase
         .from('items')
@@ -45,7 +47,6 @@ export const ItemsProvider = ({ children }: { children: ReactNode }) => {
 
       if (error) throw error;
 
-      // FIX: Mapping database snake_case to frontend camelCase
       const formattedItems: LostFoundItem[] = (data || []).map((item: any) => ({
         id: item.id,
         title: item.title,
@@ -54,32 +55,38 @@ export const ItemsProvider = ({ children }: { children: ReactNode }) => {
         type: item.type,
         location: item.location,
         status: item.status,
-        imageUrl: item.image_url, // Added mapping for images
-        submittedBy: item.submitted_by, // Matches your DB column 'submitted_by'
+        imageUrl: item.image_url, // Matches storage URL
+        submittedBy: item.submitted_by,
         submittedAt: new Date(item.created_at),
       }));
+      
       setItems(formattedItems);
     } catch (error) {
       console.error("Database fetch error:", error);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchItems();
     
+    // Subscribe to ALL changes in the items table
     const channel = supabase
-      .channel('global-items-channel')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'items' }, () => {
-        fetchItems();
-      })
+      .channel('global-items-updates')
+      .on('postgres_changes', 
+        { event: '*', schema: 'public', table: 'items' }, 
+        (payload) => {
+          console.log('Real-time update:', payload);
+          fetchItems();
+        }
+      )
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [fetchItems]);
 
   const reunionCount = items.filter(i => 
     ["returned", "resolved", "matched"].includes(i.status)
@@ -88,46 +95,53 @@ export const ItemsProvider = ({ children }: { children: ReactNode }) => {
   const addItem = async (item: any) => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Please log in first");
+      if (!user) throw new Error("Authentication required");
 
-      // FIX: Ensure keys match database column names exactly
+      // Logic: Ensure the field names here match your Supabase Table Columns
       const { error } = await supabase.from('items').insert([{ 
         title: item.title,
         description: item.description,
         category: item.category,
         type: item.type,
         location: item.location,
-        image_url: item.imageUrl, // Map frontend imageUrl to DB image_url
-        submitted_by: user.id,    // Use snake_case
+        image_url: item.image_url, // Payload from ReportItem.tsx
+        submitted_by: user.id,
         status: 'pending' 
       }]);
 
       if (error) throw error;
-      toast.success("Report submitted successfully!");
     } catch (error: any) {
-      toast.error(error.message || "Failed to submit");
+      toast.error(error.message || "Submission failed");
+      throw error;
     }
   };
 
-  const approveItem = async (id: string) => {
-    const { error } = await supabase.from('items').update({ status: 'approved' }).eq('id', id);
-    if (error) toast.error("Failed to approve");
-  };
-
-  const declineItem = async (id: string) => {
-    const { error } = await supabase.from('items').update({ status: 'declined' }).eq('id', id);
-    if (error) toast.error("Failed to decline");
-  };
-
   const updateItemStatus = async (id: string, status: ItemStatus) => {
-    const { error } = await supabase.from('items').update({ status }).eq('id', id);
-    if (error) toast.error("Status update failed");
+    try {
+      const { error } = await supabase
+        .from('items')
+        .update({ status })
+        .eq('id', id);
+
+      if (error) throw error;
+      
+      // Optimistic Local Update
+      setItems(prev => prev.map(item => 
+        item.id === id ? { ...item, status } : item
+      ));
+      
+    } catch (error) {
+      toast.error("Status update failed");
+    }
   };
+
+  const approveItem = (id: string) => updateItemStatus(id, 'approved');
+  const declineItem = (id: string) => updateItemStatus(id, 'declined');
 
   const sendMessage = async (itemId: string, receiverId: string, content: string) => {
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Unauthorized");
+      if (!user) throw new Error("Login required");
 
       const { error } = await supabase.from('messages').insert([{ 
         item_id: itemId, 
@@ -137,8 +151,10 @@ export const ItemsProvider = ({ children }: { children: ReactNode }) => {
       }]);
 
       if (error) throw error;
+      toast.success("Message sent!");
     } catch (error) {
       console.error("Message error:", error);
+      toast.error("Failed to send message");
     }
   };
 
@@ -146,6 +162,7 @@ export const ItemsProvider = ({ children }: { children: ReactNode }) => {
     const item = items.find((i) => i.id === id);
     if (!item) return null;
     
+    // Simple matching algorithm based on category
     const match = items.find(i => 
       i.type !== item.type && 
       i.category === item.category && 
@@ -164,7 +181,8 @@ export const ItemsProvider = ({ children }: { children: ReactNode }) => {
   return (
     <ItemsContext.Provider value={{ 
       items, addItem, approveItem, declineItem, updateItemStatus, 
-      matchItem, sendMessage, reunionCount, loading 
+      matchItem, sendMessage, reunionCount, loading,
+      refreshItems: fetchItems
     }}>
       {children}
     </ItemsContext.Provider>
